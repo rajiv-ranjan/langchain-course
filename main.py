@@ -2,25 +2,49 @@ import os
 from operator import itemgetter
 
 from dotenv import load_dotenv
-from langchain_core.messages import HumanMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
+# from langchain_community.chat_models import ChatOllama
+from langchain_chroma import Chroma
+from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
+from langchain_core.messages import HumanMessage
 
 load_dotenv()
+
+CHROMA_PERSIST_DIRECTORY = os.environ.get("CHROMA_PERSIST_DIRECTORY", "./chroma_db")
+CHROMA_COLLECTION_NAME = os.environ.get("CHROMA_COLLECTION_NAME", "mediumblog_rag")
 
 print("Initializing components...")
 
 embeddings = OpenAIEmbeddings()
-llm = ChatOpenAI()
 
-vectorstore = PineconeVectorStore(
-    index_name=os.environ["INDEX_NAME"], embedding=embeddings
-)
+retriever = None
 
-retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+
+def select_vectorstore():
+    """Match ingestion: Pinecone cloud or local persisted Chroma."""
+    menu = (
+        "Select vector store (must match how you ran ingestion.py):\n"
+        "  1 - Pinecone\n"
+        f"  2 - Chroma (local: {CHROMA_PERSIST_DIRECTORY})\n"
+        "Enter 1 or 2: "
+    )
+    while True:
+        choice = input(menu).strip().lower()
+        if choice in ("1", "pinecone", "p"):
+            return PineconeVectorStore(
+                index_name=os.environ["INDEX_NAME"], embedding=embeddings
+            )
+        if choice in ("2", "chroma", "c", "local"):
+            return Chroma(
+                collection_name=CHROMA_COLLECTION_NAME,
+                embedding_function=embeddings,
+                persist_directory=CHROMA_PERSIST_DIRECTORY,
+            )
+        print("Invalid choice. Enter 1 or 2.")
 
 prompt_template = ChatPromptTemplate.from_template(
     """Answer the question based only on the following context:
@@ -36,6 +60,32 @@ Provide a detailed answer:"""
 def format_docs(docs):
     """Format retrieved documents into a single string."""
     return "\n\n".join(doc.page_content for doc in docs)
+
+
+def select_chat_llm():
+    """Prompt for OpenAI or one of several Ollama chat models."""
+    menu = (
+        "Select chat model:\n"
+        "  1 - OpenAI (ChatOpenAI)\n"
+        "  2 - Ollama: qwen3.5:27b\n"
+        "  3 - Ollama: gemma3:12b\n"
+        "  4 - Ollama: llama3.1:8b\n"
+        "  5 - Ollama: qwen3.5:0.8b\n"
+        "Enter 1-5: "
+    )
+    while True:
+        choice = input(menu).strip().lower()
+        if choice in ("1", "openai"):
+            return ChatOpenAI()
+        if choice in ("2", "qwen", "ollama"):
+            return ChatOllama(model="qwen3.5:27b")
+        if choice in ("3", "gemma"):
+            return ChatOllama(model="gemma3:12b")
+        if choice in ("4", "llama"):
+            return ChatOllama(model="llama3.1:8b")
+        if choice in ("5", "qwen0.8", "0.8b"):
+            return ChatOllama(model="qwen3.5:0.8b")
+        print("Invalid choice. Enter 1, 2, 3, 4, or 5.")
 
 
 # ============================================================================
@@ -99,6 +149,11 @@ def create_retrieval_chain_with_lcel():
 
 
 if __name__ == "__main__":
+    vectorstore = select_vectorstore()
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+
+    llm = select_chat_llm()
+
     print("Retrieving...")
 
     # Query
