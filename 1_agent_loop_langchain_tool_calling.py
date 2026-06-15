@@ -12,8 +12,9 @@ MAX_ITERATIONS = 5
 ## Observation: When uisng gpt-oss:latest, the agent gives only one tool to use in each iteration. As I have set the max_iterations to 5, the agent will iterate 5 times and then max out with error message "ERROR: Max iterations reached without a final answer".
 ## Switch between the two models to see the difference.
 # MODEL = "qwen3.5:27b"
-MODEL = "gpt-oss:latest"
+# MODEL = "gpt-oss:latest"
 
+MODEL = "gemma4:latest"
 MODEL_PROVIDER = "ollama"
 
 @tool
