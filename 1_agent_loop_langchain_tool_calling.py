@@ -2,6 +2,7 @@ from dotenv import load_dotenv
 from langchain.chat_models import init_chat_model
 from langchain.tools import tool
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_ollama import ChatOllama
 from langsmith import traceable
 
 load_dotenv()
@@ -12,9 +13,10 @@ MAX_ITERATIONS = 5
 ## Observation: When uisng gpt-oss:latest, the agent gives only one tool to use in each iteration. As I have set the max_iterations to 5, the agent will iterate 5 times and then max out with error message "ERROR: Max iterations reached without a final answer".
 ## Switch between the two models to see the difference.
 # MODEL = "qwen3.5:27b"
+MODEL = "qwen3.6:27b"
 # MODEL = "gpt-oss:latest"
 
-MODEL = "gemma4:latest"
+# MODEL = "gemma4:latest"
 MODEL_PROVIDER = "ollama"
 
 @tool
@@ -42,6 +44,13 @@ def run_agent(question: str):
     tools_dict = {tool.name: tool for tool in tools}
 
     model = init_chat_model(model=MODEL, model_provider=MODEL_PROVIDER,temperature=0.0)
+
+    # think=True enables reasoning/thinking tokens (stored in additional_kwargs["reasoning_content"])
+    # Avoid temperature=0.0 — it suppresses thinking in Qwen3 models
+    #model = ChatOllama(model=MODEL, think=True)
+    
+    
+    
     model_with_tools = model.bind_tools(tools)
 
 
