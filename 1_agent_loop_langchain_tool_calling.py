@@ -75,7 +75,13 @@ def run_agent(question: str):
         ai_message = model_with_tools.invoke(messages)
 
         tool_calls = ai_message.tool_calls
-
+        
+        import json
+        print(f"{len(tool_calls)} Tool calls found:")
+   
+        print(json.dumps(tool_calls, indent=2, ensure_ascii=False))
+   
+        
         # If no tool calls, this is the final answer
         if not tool_calls:
             print(f"\nFinal Answer: {ai_message.content}")
@@ -107,7 +113,10 @@ def run_agent(question: str):
 
 
 if __name__ == "__main__":
-    # run_agent("What is the price of a laptop with a gold discount?")
+    run_agent("What is the price of a laptop with a gold discount?")
+    # run_agent("What is two different prices of a laptop with a gold and a silver discount?")
+    # run_agent("What is the price of a laptop with both gold and silver discounts applied?")
+    # run_agent("What is the price of a laptop with both gold and silver discounts applied one after the other?")
     # run_agent("What comes after alphabet A?")
     # run_agent("What is the price of a laptop with all gold, silver and bronze discounts?")
-    run_agent("What is the price of a laptop and headphones with all gold, silver and bronze discounts?")
+    # run_agent("What is the price of a laptop and headphones with all gold, silver and bronze discounts?")
