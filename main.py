@@ -148,20 +148,11 @@ def create_retrieval_chain_with_lcel():
     return retrieval_chain
 
 
-if __name__ == "__main__":
-    vectorstore = select_vectorstore()
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
-
-    llm = select_chat_llm()
-
-    print("Retrieving...")
-
-    # Query
-    query = "what is Pinecone in machine learning?"
-
-    # ========================================================================
-    # Option 0: Raw invocation without RAG
-    # ========================================================================
+# ============================================================================
+# Option 0: Raw invocation without RAG
+# ============================================================================
+def run_option_0(query: str):
+    """Option 0: Raw LLM invocation without RAG."""
     print("\n" + "=" * 70)
     print("IMPLEMENTATION 0: Raw LLM Invocation (No RAG)")
     print("=" * 70)
@@ -169,9 +160,12 @@ if __name__ == "__main__":
     print("\nAnswer:")
     print(result_raw.content)
 
-    # ========================================================================
-    # Option 1: Use implementation WITHOUT LCEL
-    # ========================================================================
+
+# ============================================================================
+# Option 1: Use implementation WITHOUT LCEL
+# ============================================================================
+def run_option_1(query: str):
+    """Option 1: Retrieval chain without LCEL."""
     print("\n" + "=" * 70)
     print("IMPLEMENTATION 1: Without LCEL")
     print("=" * 70)
@@ -179,9 +173,12 @@ if __name__ == "__main__":
     print("\nAnswer:")
     print(result_without_lcel)
 
-    # ========================================================================
-    # Option 2: Use implementation WITH LCEL (Better Approach)
-    # ========================================================================
+
+# ============================================================================
+# Option 2: Use implementation WITH LCEL (Better Approach)
+# ============================================================================
+def run_option_2(query: str):
+    """Option 2: Retrieval chain with LCEL (Better Approach)."""
     print("\n" + "=" * 70)
     print("IMPLEMENTATION 2: With LCEL - Better Approach")
     print("=" * 70)
@@ -192,8 +189,51 @@ if __name__ == "__main__":
     print("- Easy to compose with other chains")
     print("- Better for production use")
     print("=" * 70)
-
     chain_with_lcel = create_retrieval_chain_with_lcel()
     result_with_lcel = chain_with_lcel.invoke({"question": query})
     print("\nAnswer:")
     print(result_with_lcel)
+
+
+def select_option() -> int:
+    """Prompt the user to choose which implementation to run."""
+    menu = (
+        "\nSelect implementation to run:\n"
+        "  0 - Raw LLM invocation (No RAG)\n"
+        "  1 - Retrieval chain without LCEL\n"
+        "  2 - Retrieval chain with LCEL (recommended)\n"
+        "Enter 0, 1, or 2: "
+    )
+    while True:
+        choice = input(menu).strip()
+        if choice in ("0", "1", "2"):
+            return int(choice)
+        print("Invalid choice. Enter 0, 1, or 2.")
+
+
+if __name__ == "__main__":
+    vectorstore = select_vectorstore()
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+
+    llm = select_chat_llm()
+
+    print("\nType 'exit' or 'quit' at any prompt to stop.\n")
+
+    while True:
+        DEFAULT_QUERY = "what is Pinecone in machine learning?"
+        query = input(f"Enter your query [{DEFAULT_QUERY}]: ").strip()
+        if query.lower() in ("exit", "quit", "q"):
+            print("Goodbye!")
+            break
+        if not query:
+            query = DEFAULT_QUERY
+            print(f"Using default query: {query}")
+
+        option = select_option()
+
+        if option == 0:
+            run_option_0(query)
+        elif option == 1:
+            run_option_1(query)
+        elif option == 2:
+            run_option_2(query)
