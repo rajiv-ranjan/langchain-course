@@ -9,11 +9,12 @@ This guide covers installation, running, and querying vector databases used in t
 1. [ChromaDB (Local)](#chromadb-local)
 2. [Pinecone (Cloud)](#pinecone-cloud)
 3. [Milvus (Podman/Docker)](#milvus-podmandocker)
-4. [Langflow - Universal Vector DB Management (Recommended)](#langflow---universal-vector-db-management-recommended)
-5. [Flowise - Alternative Low-Code Platform](#flowise---alternative-low-code-platform)
-6. [VectorAdmin - Legacy Universal Management Tool](#vectoradmin---legacy-universal-management-tool)
-7. [Vector Database Management Tools Comparison](#vector-database-management-tools-comparison)
-8. [Current Project Configuration](#current-project-configuration)
+4. [pgvector (Local PostgreSQL)](#pgvector-local-postgresql)
+5. [Langflow - Universal Vector DB Management (Recommended)](#langflow---universal-vector-db-management-recommended)
+6. [Flowise - Alternative Low-Code Platform](#flowise---alternative-low-code-platform)
+7. [VectorAdmin - Legacy Universal Management Tool](#vectoradmin---legacy-universal-management-tool)
+8. [Vector Database Management Tools Comparison](#vector-database-management-tools-comparison)
+9. [Current Project Configuration](#current-project-configuration)
 
 ---
 
@@ -448,6 +449,453 @@ results = vectorstore.similarity_search("your query", k=5)
 for doc in results:
     print(doc.page_content)
 ```
+
+---
+
+## pgvector (Local PostgreSQL)
+
+### What is pgvector?
+pgvector is an open-source **PostgreSQL extension** that adds vector similarity search directly inside Postgres. Instead of running a separate vector database, you store embeddings as a native column type (`vector`) alongside your regular relational data. It supports:
+- **Exact** nearest-neighbor search
+- **Approximate** nearest-neighbor search (IVFFlat and HNSW indexes)
+- L2 distance, inner product, and cosine similarity operators
+- Works with any standard PostgreSQL tooling, drivers, and ORMs
+
+---
+
+### Version Reference (as of July 2026)
+
+| Component | Latest Stable | Released |
+|-----------|--------------|---------|
+| **PostgreSQL** | **18.4** | May 14, 2026 |
+| **pgvector** | **0.8.4** | June 30, 2026 |
+
+pgvector **0.8.4** supports PostgreSQL **17 and 18**.
+
+> **Important:** When using vector distance results as numeric values in aggregations or comparisons on PostgreSQL 17+, append `+ 0`. See the [gotcha note](#pg17-gotcha) in the validation section below.
+
+---
+
+### Prerequisites
+
+| Tool | Why |
+|------|-----|
+| **Homebrew** | Package manager used to install PostgreSQL |
+| **PostgreSQL 17 or 18** | pgvector 0.8.4 supports both; 18.4 is the latest stable |
+| **Xcode CLI tools** | Needed to compile the pgvector extension from source |
+
+Verify Homebrew is installed:
+```bash
+brew --version
+```
+
+If not installed:
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+---
+
+### Step 1 — Install PostgreSQL via Homebrew
+
+Install PostgreSQL 18 (latest stable, recommended):
+```bash
+brew install postgresql@18
+```
+
+Add PostgreSQL 18 binaries to your PATH:
+```bash
+echo 'export PATH="/opt/homebrew/opt/postgresql@18/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+Verify the installation:
+```bash
+psql --version
+# Expected: psql (PostgreSQL) 18.x
+```
+
+---
+
+### Step 2 — Start PostgreSQL Service
+
+```bash
+brew services start postgresql@18
+```
+
+Confirm the service is running:
+```bash
+brew services list | grep postgresql
+# Expected: postgresql@18   started  ...
+```
+
+---
+
+### Step 3 — Install Xcode Command Line Tools (if not already present)
+
+pgvector is compiled from source, so the C compiler and build tools must be available:
+```bash
+xcode-select --install
+```
+
+If already installed, you will see:
+```
+xcode-select: error: command line tools are already installed
+```
+
+---
+
+### Step 4 — Install pgvector Extension
+
+**Option A — via Homebrew (easiest, recommended)**
+
+The Homebrew pgvector formula installs **pgvector 0.8.4** and links it automatically to `postgresql@18`:
+```bash
+brew install pgvector
+```
+
+Verify the extension files were installed:
+```bash
+ls $(pg_config --pkglibdir) | grep vector
+# Expected: vector.so (or vector.dylib)
+```
+
+**Option B — compile from source (installs a specific version, or if Homebrew is unavailable)**
+```bash
+cd /tmp
+git clone --branch v0.8.4 https://github.com/pgvector/pgvector.git
+cd pgvector
+make
+make install   # installs into the directory reported by pg_config
+```
+
+---
+
+### Step 5 — Create a Database and Enable the Extension
+
+Connect to PostgreSQL as the default superuser:
+```bash
+psql postgres
+```
+
+Inside the `psql` shell, create a dedicated database and enable pgvector:
+```sql
+-- Create a test database
+CREATE DATABASE vectordb;
+
+-- Connect to it
+\c vectordb
+
+-- Enable the pgvector extension
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- Verify the extension is active
+SELECT * FROM pg_extension WHERE extname = 'vector';
+-- Expected: one row showing  extname = vector
+```
+
+Exit the shell:
+```sql
+\q
+```
+
+---
+
+### Step 6 — Validate the Installation
+
+#### 6.1 — Create a table with a vector column
+
+```bash
+psql -d vectordb
+```
+
+```sql
+-- Create a table that stores 3-dimensional vectors
+CREATE TABLE items (
+    id   BIGSERIAL PRIMARY KEY,
+    name TEXT,
+    embedding vector(3)
+);
+```
+
+#### 6.2 — Insert sample vectors
+
+```sql
+INSERT INTO items (name, embedding) VALUES
+    ('item-a', '[1,2,3]'),
+    ('item-b', '[4,5,6]'),
+    ('item-c', '[1,1,1]'),
+    ('item-d', '[7,8,9]');
+```
+
+#### 6.3 — Run a nearest-neighbor query (L2 distance)
+
+```sql
+-- Find the 3 items closest to the vector [3,3,3] using L2 (Euclidean) distance
+SELECT id, name, embedding,
+       embedding <-> '[3,3,3]' AS distance
+FROM   items
+ORDER  BY embedding <-> '[3,3,3]'
+LIMIT  3;
+```
+
+Expected output (exact distances may vary):
+```
+ id | name   | embedding | distance
+----+--------+-----------+----------
+  3 | item-c | [1,1,1]   | 3.464...
+  1 | item-a | [1,2,3]   | 2.000...
+  2 | item-b | [4,5,6]   | 3.741...
+```
+
+#### 6.4 — Run a cosine similarity query
+
+```sql
+-- Find the 3 items most similar to [3,3,3] using cosine distance
+SELECT id, name, embedding,
+       1 - (embedding <=> '[3,3,3]') AS cosine_similarity
+FROM   items
+ORDER  BY embedding <=> '[3,3,3]'
+LIMIT  3;
+```
+
+#### 6.5 — Create an HNSW index (for approximate nearest-neighbor at scale)
+
+```sql
+-- HNSW index for L2 distance (recommended for production workloads)
+CREATE INDEX ON items USING hnsw (embedding vector_l2_ops);
+
+-- Verify the index exists
+\d items
+-- You should see the hnsw index listed under Indexes
+```
+
+#### 6.6 — Check installed extension version
+
+```sql
+SELECT extname, extversion FROM pg_extension WHERE extname = 'vector';
+-- Expected: vector  |  0.8.4
+```
+
+#### 6.7 — PostgreSQL 17+ gotcha: the `+ 0` requirement <a name="pg17-gotcha"></a>
+
+On PostgreSQL 17 and later, the query planner has stricter type resolution for vector expressions. If you see an error like `operator does not exist: vector + unknown`, append `+ 0` when you need to cast a vector result to a numeric type in a query:
+
+```sql
+-- Standard query — works as-is
+SELECT id, embedding <-> '[1,2,3]' AS distance
+FROM   items
+ORDER  BY distance
+LIMIT  3;
+
+-- When comparing or aggregating the distance result as a number, append + 0:
+SELECT id, (embedding <-> '[1,2,3]') + 0 AS distance
+FROM   items
+ORDER  BY distance
+LIMIT  3;
+```
+
+This is a PostgreSQL type-resolution behavior, not a pgvector bug.
+
+---
+
+### Step 7 — Install the Python Client
+
+For use with LangChain and this project, install the required Python packages:
+
+```bash
+# with uv (recommended)
+uv pip install langchain-postgres psycopg2-binary pgvector
+
+# or with pip
+pip install langchain-postgres psycopg2-binary pgvector
+```
+
+---
+
+### Step 8 — Quick Python Smoke Test
+
+Create a file `test_pgvector.py` and run it to confirm the full stack works end-to-end:
+
+```python
+import psycopg2
+from pgvector.psycopg2 import register_vector
+import numpy as np
+
+# Connect to PostgreSQL
+conn = psycopg2.connect(dbname="vectordb", user="postgres", host="localhost")
+register_vector(conn)
+
+cur = conn.cursor()
+
+# Create a fresh table
+cur.execute("DROP TABLE IF EXISTS smoke_test")
+cur.execute("CREATE TABLE smoke_test (id bigserial PRIMARY KEY, embedding vector(3))")
+
+# Insert a vector using numpy
+cur.execute("INSERT INTO smoke_test (embedding) VALUES (%s)", (np.array([1, 2, 3]),))
+conn.commit()
+
+# Query nearest neighbor
+cur.execute(
+    "SELECT id, embedding FROM smoke_test ORDER BY embedding <-> %s LIMIT 1",
+    (np.array([1, 2, 3]),),
+)
+row = cur.fetchone()
+print(f"Nearest neighbor id={row[0]}, embedding={row[1]}")
+
+# Clean up
+cur.execute("DROP TABLE smoke_test")
+conn.commit()
+cur.close()
+conn.close()
+print("pgvector smoke test PASSED")
+```
+
+Run it:
+```bash
+python test_pgvector.py
+# Expected: Nearest neighbor id=1, embedding=[1, 2, 3]
+#           pgvector smoke test PASSED
+```
+
+---
+
+### Useful psql Commands
+
+| Command | Description |
+|---------|-------------|
+| `\dx` | List all installed extensions |
+| `\d items` | Describe the `items` table (shows indexes) |
+| `\dt` | List all tables in current database |
+| `\l` | List all databases |
+| `\c vectordb` | Connect to `vectordb` database |
+| `\q` | Quit psql |
+
+---
+
+### Connection String Format
+
+```
+postgresql://postgres@localhost:5432/vectordb
+```
+
+For use in `.env`:
+```bash
+PGVECTOR_CONNECTION_STRING=postgresql://postgres@localhost:5432/vectordb
+```
+
+---
+
+### Stopping / Restarting the Service
+
+```bash
+# Stop PostgreSQL
+brew services stop postgresql@18
+
+# Restart PostgreSQL
+brew services restart postgresql@18
+
+# Check status
+brew services list | grep postgresql
+```
+
+---
+
+### Troubleshooting
+
+#### `initdb: error: file "postgres.bki" does not exist` (during `brew install postgresql@18`)
+
+This is a known Homebrew bottle issue on Apple Silicon Macs. The binary files land in the Cellar but two symlinks that PostgreSQL's compiled-in paths expect are never created. The result is a cascade of errors during `initdb`. Fix in order:
+
+**Option A — re-run the post-install hook (quickest):**
+```bash
+brew postinstall postgresql@18
+```
+
+**Option B — clean reinstall (if Option A fails):**
+```bash
+brew uninstall postgresql@18
+rm -rf /opt/homebrew/var/postgresql@18
+brew reinstall postgresql@18
+```
+
+**Option C — manually create the two missing symlinks, then run `initdb` (confirmed working fix):**
+
+Homebrew's failed post-install leaves two compiled-in paths unresolved. Create both symlinks first, then initialize the data directory:
+
+```bash
+# 1. Create the missing share symlink (timezone data, postgres.bki, etc.)
+ln -sf /opt/homebrew/Cellar/postgresql@18/18.4/share/postgresql \
+       /opt/homebrew/share/postgresql@18
+
+# 2. Create the missing lib symlink (extension .dylib files e.g. dict_snowball, pgvector)
+ln -sf /opt/homebrew/Cellar/postgresql@18/18.4/lib/postgresql \
+       /opt/homebrew/lib/postgresql@18
+
+# 3. Run initdb — both symlinks now in place, should complete successfully
+/opt/homebrew/Cellar/postgresql@18/18.4/bin/initdb \
+  --locale=en_US.UTF-8 -E UTF-8 \
+  /opt/homebrew/var/postgresql@18
+```
+
+Expected output ends with:
+```
+syncing data to disk ... ok
+Success. You can now start the database server using: ...
+```
+
+> **Why two symlinks are needed:** PostgreSQL is compiled with two hardcoded prefix paths:
+> - `datadir   = /opt/homebrew/share/postgresql@18` — timezone data, `postgres.bki`, SQL bootstrap files
+> - `pkglibdir = /opt/homebrew/lib/postgresql@18` — extension `.dylib` files loaded at runtime
+>
+> Homebrew's broken post-install creates neither. The `-L` flag to `initdb` only covers `postgres.bki` during bootstrap; it does not redirect the compiled-in `pkglibdir` used for extension loading.
+
+After any of the above succeeds, start the service and verify:
+```bash
+brew services start postgresql@18
+psql --version
+psql postgres -c "SELECT version();"
+```
+
+---
+
+#### `brew install pgvector` — link step fails with "symlink belonging to postgresql@18"
+
+After `brew install pgvector` you may see:
+
+```
+Error: The `brew link` step did not complete successfully
+Could not symlink lib/postgresql/_int.dylib
+Target /opt/homebrew/lib/postgresql/_int.dylib
+is a symlink belonging to postgresql@18.
+```
+
+This happens because `/opt/homebrew/lib/postgresql/` is already managed by the `postgresql@18` keg. Fix with a single command:
+
+```bash
+brew link --overwrite pgvector
+```
+
+Then enable the extension in your database:
+
+```bash
+psql vectordb -c "CREATE EXTENSION IF NOT EXISTS vector;"
+psql vectordb -c "SELECT extname, extversion FROM pg_extension WHERE extname = 'vector';"
+# Expected: vector | 0.8.4
+```
+
+---
+
+#### Other common errors
+
+| Problem | Fix |
+|---------|-----|
+| `psql: error: connection refused` | PostgreSQL is not running — run `brew services start postgresql@18` |
+| `ERROR: could not open extension control file ... vector.control` | pgvector not installed — run `brew install pgvector && brew link --overwrite pgvector` |
+| `command not found: psql` | PATH not set — add `/opt/homebrew/opt/postgresql@18/bin` to `~/.zshrc` |
+| `ERROR: type "vector" does not exist` | Extension not enabled in this DB — run `CREATE EXTENSION vector;` |
+| `make: pg_config: No such file or directory` (source build) | pg_config not on PATH — fix PATH and retry |
 
 ---
 
@@ -1993,7 +2441,7 @@ LANGSMITH_PROJECT=project4-rag-gist
 ## Summary
 
 This guide covered:
-- ✅ **3 Vector Databases**: ChromaDB (local), Pinecone (cloud), Milvus (self-hosted)
+- ✅ **4 Vector Databases**: ChromaDB (local), Pinecone (cloud), Milvus (self-hosted), pgvector (PostgreSQL)
 - ✅ **3 Management Tools**: Langflow (recommended), Flowise (alternative), VectorAdmin (legacy)
 - ✅ **Podman Integration**: All Docker commands converted to Podman equivalents
 - ✅ **Complete Workflows**: Install, run, query, and manage vector databases
@@ -2005,6 +2453,7 @@ This guide covered:
 2. **For production**: Use **Pinecone** + **Langflow**
 3. **For scale & self-hosted**: Use **Milvus** + **Langflow** or **Flowise**
 4. **For AI agents**: Use **Flowise** with any vector database
+5. **For relational + vector in one DB**: Use **pgvector** (PostgreSQL extension)
 
 ### Next Steps
 
@@ -2016,4 +2465,4 @@ This guide covered:
 
 ---
 
-**Last Updated**: June 16, 2026
+**Last Updated**: July 6, 2026

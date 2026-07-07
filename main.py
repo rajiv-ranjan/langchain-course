@@ -2,64 +2,99 @@ import os
 from operator import itemgetter
 
 from dotenv import load_dotenv
+from langchain_chroma import Chroma
+from langchain_core.messages import HumanMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
-# from langchain_community.chat_models import ChatOllama
-from langchain_chroma import Chroma
-from langchain_ollama import ChatOllama
+from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_pinecone import PineconeVectorStore
-from langchain_core.messages import HumanMessage
+from langchain_postgres import PGVector
 
 load_dotenv()
 
 CHROMA_PERSIST_DIRECTORY = os.environ.get("CHROMA_PERSIST_DIRECTORY", "./chroma_db")
-CHROMA_COLLECTION_NAME = os.environ.get("CHROMA_COLLECTION_NAME", "mediumblog_rag")
+CHROMA_COLLECTION_NAME_LOCAL = os.environ.get(
+    "CHROMA_COLLECTION_NAME_LOCAL", "mediumblog_rag_local"
+)
+PGVECTOR_CONNECTION_STRING = os.environ.get(
+    "PGVECTOR_CONNECTION_STRING", "postgresql+psycopg://localhost:5432/vectordb"
+)
+PGVECTOR_COLLECTION_NAME = os.environ.get("PGVECTOR_COLLECTION_NAME", "mediumblog_rag")
+OLLAMA_EMBEDDING_MODEL = os.environ.get("OLLAMA_EMBEDDING_MODEL", "mxbai-embed-large")
 
 print("Initializing components...")
 
-embeddings = OpenAIEmbeddings()
-
+# Module-level globals — set in __main__ and shared across all functions.
+vectorstore = None
 retriever = None
+llm = None
 
+
+# ============================================================================
+# Setup helpers
+# ============================================================================
 
 def select_vectorstore():
-    """Match ingestion: Pinecone cloud or local persisted Chroma."""
+    """Match ingestion: Pinecone (OpenAI embeddings) or local Chroma/PGVector (Ollama embeddings)."""
     menu = (
         "Select vector store (must match how you ran ingestion.py):\n"
-        "  1 - Pinecone\n"
-        f"  2 - Chroma (local: {CHROMA_PERSIST_DIRECTORY})\n"
-        "Enter 1 or 2: "
+        "  1 - Pinecone     (cloud index)        [embedding: OpenAI text-embedding-ada-002]\n"
+        f"  2 - Chroma       (local disk)         [embedding: Ollama/{OLLAMA_EMBEDDING_MODEL}]\n"
+        f"  3 - PGVector     (local postgres)     [embedding: Ollama/{OLLAMA_EMBEDDING_MODEL}]\n"
+        "Enter 1, 2, or 3: "
     )
     while True:
         choice = input(menu).strip().lower()
         if choice in ("1", "pinecone", "p"):
+            embeddings = OpenAIEmbeddings(openai_api_key=os.environ.get("OPENAI_API_KEY"))
             return PineconeVectorStore(
                 index_name=os.environ["INDEX_NAME"], embedding=embeddings
             )
         if choice in ("2", "chroma", "c", "local"):
+            embeddings = OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL)
             return Chroma(
-                collection_name=CHROMA_COLLECTION_NAME,
+                collection_name=CHROMA_COLLECTION_NAME_LOCAL,
                 embedding_function=embeddings,
                 persist_directory=CHROMA_PERSIST_DIRECTORY,
             )
-        print("Invalid choice. Enter 1 or 2.")
-
-prompt_template = ChatPromptTemplate.from_template(
-    """Answer the question based only on the following context:
-
-{context}
-
-Question: {question}
-
-Provide a detailed answer:"""
-)
+        if choice in ("3", "pgvector", "pg"):
+            embeddings = OllamaEmbeddings(model=OLLAMA_EMBEDDING_MODEL)
+            return PGVector(
+                embeddings=embeddings,
+                collection_name=PGVECTOR_COLLECTION_NAME,
+                connection=PGVECTOR_CONNECTION_STRING,
+                use_jsonb=True,
+            )
+        print("Invalid choice. Enter 1, 2, or 3.")
 
 
-def format_docs(docs):
-    """Format retrieved documents into a single string."""
-    return "\n\n".join(doc.page_content for doc in docs)
+def select_score_threshold() -> float | None:
+    """Ask user for an optional minimum relevance threshold (0.0–1.0).
+
+    Returns the threshold float, or None if the user skips.
+    """
+    prompt = (
+        "\nSet a minimum relevance threshold to filter retrieved documents.\n"
+        "  • Scores are normalized 0.0–1.0 (higher = more relevant).\n"
+        "  • Documents below the threshold are discarded before reaching the LLM.\n"
+        "  • Suggested starting points: Pinecone → 0.75 | Chroma/PGVector → 0.60\n"
+        "Enter threshold (0.0–1.0) or press Enter to skip [no filter]: "
+    )
+    while True:
+        raw = input(prompt).strip()
+        if not raw:
+            print("No threshold set — all top-k documents will be used.")
+            return None
+        try:
+            value = float(raw)
+            if 0.0 <= value <= 1.0:
+                print(f"Threshold set to {value:.2f} — docs below this score will be discarded.")
+                return value
+            print("Please enter a value between 0.0 and 1.0.")
+        except ValueError:
+            print("Invalid input. Enter a decimal number like 0.7, or press Enter to skip.")
 
 
 def select_chat_llm():
@@ -69,7 +104,7 @@ def select_chat_llm():
         "  1 - OpenAI (ChatOpenAI)\n"
         "  2 - Ollama: qwen3.5:27b\n"
         "  3 - Ollama: gemma3:12b\n"
-        "  4 - Ollama: llama3.1:8b\n"
+        "  4 - Ollama: llama3.2:3b\n"
         "  5 - Ollama: qwen3.5:0.8b\n"
         "Enter 1-5: "
     )
@@ -82,10 +117,65 @@ def select_chat_llm():
         if choice in ("3", "gemma"):
             return ChatOllama(model="gemma3:12b")
         if choice in ("4", "llama"):
-            return ChatOllama(model="llama3.1:8b")
+            return ChatOllama(model="llama3.2:3b")
         if choice in ("5", "qwen0.8", "0.8b"):
             return ChatOllama(model="qwen3.5:0.8b")
         print("Invalid choice. Enter 1, 2, 3, 4, or 5.")
+
+
+# ============================================================================
+# Document preview helpers
+# ============================================================================
+
+def ask_preview_docs() -> bool:
+    """Ask whether to preview retrieved documents and their relevance scores."""
+    while True:
+        choice = input("\nPreview retrieved documents with relevance scores? (y/n): ").strip().lower()
+        if choice in ("y", "yes"):
+            return True
+        if choice in ("n", "no"):
+            return False
+        print("Enter y or n.")
+
+
+def print_docs_with_scores(query: str) -> None:
+    """Retrieve documents with relevance scores and print a formatted preview.
+
+    Uses similarity_search_with_relevance_scores() which normalises scores to
+    0.0–1.0 (higher = more relevant) consistently across all three backends.
+    """
+    results = vectorstore.similarity_search_with_relevance_scores(query, k=3)
+
+    print(f"\n{'─' * 70}")
+    print(f"  RETRIEVED DOCUMENTS — {len(results)} result(s) for query:")
+    print(f"  \"{query}\"")
+    print(f"{'─' * 70}")
+
+    if not results:
+        print("  No documents returned.")
+        print(f"{'─' * 70}\n")
+        return
+
+    for i, (doc, score) in enumerate(results, start=1):
+        pct = score * 100
+        if pct >= 75:
+            label = "High"
+        elif pct >= 50:
+            label = "Medium"
+        else:
+            label = "Low"
+
+        source = doc.metadata.get("source", "unknown")
+        preview = doc.page_content[:200].replace("\n", " ").strip()
+        if len(doc.page_content) > 200:
+            preview += "..."
+
+        print(f"\n  Doc {i} of {len(results)}")
+        print(f"  Relevance : {pct:.1f}%  [{label}]")
+        print(f"  Source    : {source}")
+        print(f"  Preview   : {preview}")
+
+    print(f"\n{'─' * 70}\n")
 
 
 # ============================================================================
@@ -103,19 +193,10 @@ def retrieval_chain_without_lcel(query: str):
     - Harder to compose with other chains
     - More verbose and error-prone
     """
-    # Step 1: Retrieve relevant documents
     docs = retriever.invoke(query)
-
-    # Step 2: Format documents into context string
     context = format_docs(docs)
-
-    # Step 3: Format the prompt with context and question
     messages = prompt_template.format_messages(context=context, question=query)
-
-    # Step 4: Invoke LLM with the formatted messages
     response = llm.invoke(messages)
-
-    # Step 5: Return the content
     return response.content
 
 
@@ -148,6 +229,11 @@ def create_retrieval_chain_with_lcel():
     return retrieval_chain
 
 
+def format_docs(docs):
+    """Format retrieved documents into a single string."""
+    return "\n\n".join(doc.page_content for doc in docs)
+
+
 # ============================================================================
 # Option 0: Raw invocation without RAG
 # ============================================================================
@@ -169,6 +255,8 @@ def run_option_1(query: str):
     print("\n" + "=" * 70)
     print("IMPLEMENTATION 1: Without LCEL")
     print("=" * 70)
+    if ask_preview_docs():
+        print_docs_with_scores(query)
     result_without_lcel = retrieval_chain_without_lcel(query)
     print("\nAnswer:")
     print(result_without_lcel)
@@ -189,6 +277,8 @@ def run_option_2(query: str):
     print("- Easy to compose with other chains")
     print("- Better for production use")
     print("=" * 70)
+    if ask_preview_docs():
+        print_docs_with_scores(query)
     chain_with_lcel = create_retrieval_chain_with_lcel()
     result_with_lcel = chain_with_lcel.invoke({"question": query})
     print("\nAnswer:")
@@ -211,9 +301,27 @@ def select_option() -> int:
         print("Invalid choice. Enter 0, 1, or 2.")
 
 
+prompt_template = ChatPromptTemplate.from_template(
+    """Answer the question based only on the following context:
+
+{context}
+
+Question: {question}
+
+Provide a detailed answer:"""
+)
+
 if __name__ == "__main__":
     vectorstore = select_vectorstore()
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+
+    threshold = select_score_threshold()
+    if threshold is not None:
+        retriever = vectorstore.as_retriever(
+            search_type="similarity_score_threshold",
+            search_kwargs={"score_threshold": threshold, "k": 3},
+        )
+    else:
+        retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
 
     llm = select_chat_llm()
 
